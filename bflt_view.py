@@ -1,21 +1,15 @@
-from binaryninja import Architecture, BinaryReader, BinaryView, BinaryWriter, Platform, Architecture
+from binaryninja import Architecture, BinaryReader, BinaryView, BinaryWriter, Platform, Architecture, RelocationType
 from binaryninja.enums import SectionSemantics, SegmentFlag
-from binaryninja import core as BNCore
+from binaryninja import _binaryninjacore as core
 from .bflt_file import BfltFile, get_relocation_fields
 
 import struct
 
 class BfltView(BinaryView):
-    """
-    This is our custom Binary View.
-    """
-    name = 'bFLT File'
+    name = 'bFLT'
 
-    @classmethod
-    def is_valid_for_data(cls, data):
-        """
-        This function tells Binja whether to use this view for a given file
-        """
+    @staticmethod
+    def is_valid_for_data(data):
         if data[0:4] == b'bFLT':
             if data[4:8] != b"\x00\x00\x00\x04":
                 print("Only bFLT Revision 4 for Blackfin currently supported.")
@@ -29,18 +23,31 @@ class BfltView(BinaryView):
         :param data: the file data
         """
         BinaryView.__init__(self, file_metadata=data.file, parent_view=data)
-        self.platform = Platform["linux-blackfin"]
-        self.architecture = Architecture["blackfin"]
-        self.parse_format(data)
 
-    def parse_format(self, data):
+    def init(self):
+        self.platform = Platform["linux-blackfin"]
+        self.arch = Architecture["blackfin"]
+        self.bflt = BfltFile(self.parent_view)
+        self.loading_addr = 0x10000000
+        self.set_segments_sections()
+        self.do_relocations()
+
+        print("init view")
+        return True
+
+    def perform_is_executable(self):
+        return True
+
+    def perform_is_relocatable(self):
+        return True
+
+    def set_segments_sections(self):
         """
         This is a helper function to parse our BS format
         :param data:
         :return:
         """
-        loading_addr = 0x10000000
-        bflt = BfltFile(data)
+        
 
         # Entry point is defined in the header and can be accessed with bflt.entry.
         # this value is relative to the start of the file including the header,
@@ -52,42 +59,16 @@ class BfltView(BinaryView):
         # can this be automated? Like how the elf loader knows to define _start, main
         # and all of the helper functions that are standard to elf files
 
-        i = 0
-        while i < len(bflt.relocations):
-            operation, offset = get_relocation_fields(bflt.relocations[i])
-            if operation == 3: # c
-                target = get_relocation_fields(bflt.relocations[i + 1])[1] + bflt.header_size
-                # data[target:target + 2] = struct.pack("<H", offset)
-                i += 2
-                continue
+        text_foffset = self.bflt.header_size
+        text_start   = self.loading_addr
+        text_size    = self.bflt.data_start - self.bflt.header_size
 
-            if operation == 2: # 8
-                target = offset + bflt.header_size
-                target_data = struct.unpack("<I", data[target:target + 4])[0]
-                # data[target:target + 4] = target_data + loading_addr
-
-            if operation == 1: # 4
-                target = offset + bflt.header_size
-                target_data = struct.unpack("<H", data[target:target + 2])[0]
-                # data[target:target + 2] = 0
-
-            if operation == 0: # 0
-                target = offset + bflt.header_size
-                target_data = struct.unpack("<H", data[target:target + 2])[0]
-                # data[target:target + 2] = target_data + loading_addr
-
-            i += 1
-
-        text_foffset = bflt.header_size
-        text_start   = loading_addr
-        text_size    = bflt.data_start - bflt.header_size
-
-        data_foffset = bflt.data_start
+        data_foffset = self.bflt.data_start
         data_start   = text_start + text_size
-        data_size    = bflt.data_end - bflt.data_start
+        data_size    = self.bflt.data_end - self.bflt.data_start
 
         bss_start    = data_start + data_size
-        bss_size     = bflt.bss_end - bflt.data_end
+        bss_size     = self.bflt.bss_end - self.bflt.data_end
 
         code_flags = SegmentFlag.SegmentReadable | SegmentFlag.SegmentExecutable | SegmentFlag.SegmentContainsCode
         data_flags = SegmentFlag.SegmentReadable | SegmentFlag.SegmentWritable   | SegmentFlag.SegmentContainsData | SegmentFlag.SegmentDenyExecute
@@ -102,4 +83,51 @@ class BfltView(BinaryView):
         self.add_auto_segment(bss_start, bss_size, 0, 0, bss_flags)
         self.add_auto_section(".bss", bss_start, bss_size, SectionSemantics.ReadWriteDataSectionSemantics)
 
-        self.add_entry_point(loading_addr + (bflt.entry - bflt.header_size))
+        self.add_entry_point(self.loading_addr + (self.bflt.entry - self.bflt.header_size))
+
+    def do_relocations(self):
+        global_reloc_offset = 0
+        i = 0
+        while i < len(self.bflt.relocations):
+            ri = core.BNRelocationInfo()
+
+            operation, offset = get_relocation_fields(self.bflt.relocations[i])
+
+            if operation == 3: # c
+                global_reloc_offset = offset
+                i += 1
+                continue
+
+            if operation == 2: # 8
+                target = offset 
+                target_data = struct.unpack("<I", self.parent_view[target + self.bflt.header_size:target + self.bflt.header_size + 4])[0] + self.loading_addr
+                ri.type = 3
+                ri.size = 4
+                ri.nativeType = 2
+                # ri.addend = offset
+                ri.target = target_data
+
+
+            if operation == 1: # 4
+                target = offset
+                target_data = ((self.loading_addr & 0xffff0000) >> 16) + global_reloc_offset
+                ri.type = 3
+                ri.size = 2
+                ri.nativeType = 1
+                # ri.addend = offset
+                ri.target = target_data
+
+            if operation == 0: # 0
+                target = offset
+                target_data = struct.unpack("<H", self.parent_view[target + self.bflt.header_size:target + self.bflt.header_size + 2])[0]
+                target_data = target_data + (self.loading_addr & 0xffff)
+                ri.type = 3
+                ri.size = 2
+                ri.nativeType = 0
+                # ri.addend = offset
+                ri.target = target_data
+
+            # if ri.nativeType == 1:
+                # print(f"nativeType: {ri.nativeType}, target_data: {target_data:#x}, address: {ri.address + loading_addr:#x}")
+            core.BNDefineRelocation(self.handle, self.arch.handle, ri, target_data, self.loading_addr + target)
+            i += 1
