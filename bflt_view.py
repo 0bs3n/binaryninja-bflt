@@ -6,7 +6,7 @@ from .bflt_file import BfltFile, get_relocation_fields
 import struct
 
 class BfltView(BinaryView):
-    name = 'bFLT'
+    name = 'bFLT File'
 
     @staticmethod
     def is_valid_for_data(data):
@@ -78,7 +78,7 @@ class BfltView(BinaryView):
         self.add_auto_section(".text", text_start, text_size, SectionSemantics.ReadOnlyCodeSectionSemantics)
 
         self.add_auto_segment(data_start, data_size, data_foffset, data_size, data_flags)
-        self.add_auto_section(".data", data_start, data_size, SectionSemantics.ReadOnlyDataSectionSemantics)
+        self.add_auto_section(".data", data_start, data_size, SectionSemantics.ReadWriteDataSectionSemantics)
 
         self.add_auto_segment(bss_start, bss_size, 0, 0, bss_flags)
         self.add_auto_section(".bss", bss_start, bss_size, SectionSemantics.ReadWriteDataSectionSemantics)
